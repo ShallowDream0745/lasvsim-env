@@ -24,7 +24,7 @@ class CloudServer:
         print(f"Deleting instance with record_index: {record_index}")
 
     def __init__(self):
-        self.idsim_id  = str
+        pass
 
     def init_qx(self, env_config: Config, qx_config:dict):
         env_config_dict = asdict(env_config)

@@ -1,4 +1,3 @@
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 import textwrap
@@ -6,41 +5,14 @@ from typing import Any, Dict, Optional, Tuple, Union, List
 
 from omegaconf import OmegaConf
 
-token_path = os.path.dirname(__file__) + "/lasvsim.token"
-print("token_path: ", token_path)
-if os.path.exists(token_path):
-    with open(token_path, 'r') as file:
-        token_str = file.read()
-else:
-    raise FileNotFoundError("Cannot find token file.")
-
-lasvsim_config = {
-    'token': token_str,
-    'task_id': 146,
-    'record_id': [1, 2, 3], ## simulation id list
-    'b_surr': True,
-    "render_flag": False,
-    "traj_flag": False,
-    "server_host" : 'localhost:8290',
-    # this will be shared
-    "render_info": {
-        "_debug_path_qxdata": None,
-        "draw_bound": 30,
-        "show_npc": True,
-        "type": ".png",
-        "dpi": 300
-        },
-}
-
 FAKE_PATH = Path('/')
-
 Color = Any  # Tuple[int, int, int, int]
 PolyOption = Tuple[Color, int, float, bool]  # color, layer, width, filled
 ObsNumSur = Any  # Union[int, Dict[str, int]]
 
 @dataclass(frozen=False)
 class Config:
-    """Configuration for the idSim environment."""
+    """Configuration for the Lasvsim environment."""
 
     seed: Optional[int] = None
     debug: bool = False

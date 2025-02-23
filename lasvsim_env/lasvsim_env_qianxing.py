@@ -8,44 +8,19 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from shapely.geometry import Point, LineString, Polygon
-
-import grpc
-from lasvsim_connect.risenlighten.lasvsim.train_sim.api.trainsim import trainsim_pb2
-from lasvsim_connect.risenlighten.lasvsim.train_sim.api.trainsim import trainsim_pb2_grpc
-from lasvsim_connect.risenlighten.lasvsim.train_sim.api.trainsim import scenario_pb2
-from lasvsim_connect.risenlighten.lasvsim.train_sim.api.trainsim import scenario_pb2_grpc
-from lasvsim_connect.risenlighten.lasvsim.lasvsim_web_bff.openapi.train_task.v1 import train_task_pb2
-from lasvsim_connect.risenlighten.lasvsim.lasvsim_web_bff.openapi.train_task.v1 import train_task_pb2_grpc
-
-from lasvsim_env.lasvsim_dataclasses import \
-    EgoVehicle, SurroundingVehicle, LasVSimContext
-from lasvsim_env.utils.map_tool.lib.map import Map
-
-import os
+    
+from lasvsim_openapi.client import Client
+from lasvsim_openapi.http_client import HttpConfig
+from lasvsim_openapi.simulator_model import SimulatorConfig
+from lasvsim_env.lasvsim_dataclasses import EgoVehicle, SurroundingVehicle, LasVSimContext
 from lasvsim_env.utils.map_tool.lib.map import Map
 from lasvsim_env.utils.lib import \
     point_project_to_line, compute_waypoints_by_intervals, compute_waypoint, create_box_polygon
-from lasvsim_env.utils.las_render_utils import \
-    RenderCfg, _render_tags, LasStateSurrogate, append_to_pickle_incremental, render_tags_debug
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-    
-from lasvsim_env.utils.log_utils import LoggingInterceptor
-
-## Utils: math functions
 from lasvsim_env.utils.math_utils import \
     deal_with_phi_rad, convert_ref_to_ego_coord, \
     inverse_normalize_action, cal_dist, \
     get_indices_of_k_smallest, convert_ground_coord_to_ego_coord, \
     calculate_perpendicular_points
-from lasvsim_env.utils.lib import \
-    point_project_to_line, compute_waypoint, create_box_polygon
-## Utils: log and render
-from lasvsim_env.utils.log_utils \
-    import LoggingInterceptor
-from lasvsim_env.utils.las_render_utils \
-    import RenderCfg, _render_tags, LasStateSurrogate, append_to_pickle_incremental, render_tags_debug
-
 from lasvsim_env.dataclass import EgoVehicle, SurroundingVehicle, LasVSimContext
 from lasvsim_env.traj_processor import compute_intervals, compute_intervals_in_junction, compute_intervals_initsegment_green, compute_intervals_initsegment_red
 
@@ -55,46 +30,28 @@ class LasvsimEnv():
         token: str,
         env_config: Dict = {},
         task_id=None,
-        port: int = 8000,
-        server_host='localhost:8290',
-        render_info: dict = {},
         render_flag: bool = False,
         traj_flag: bool = False,
         **kwargs: Any,
     ):
-        self.port = port
         self.metadata = [('authorization', 'Bearer ' + token)]
         assert task_id is not None, "None task id"
 
         # ================== 1. Build a connection ==================
-        # connect train_task
-        self.sce_insecure_channel = grpc.insecure_channel(server_host)
-        self.sce_channel = grpc.intercept_channel(
-            self.sce_insecure_channel.__enter__(), LoggingInterceptor())
-        self.sce_stub = train_task_pb2_grpc.TrainTaskStub(self.sce_channel)
-
-        # connect scenario
-        self.insecure_channel = grpc.insecure_channel(server_host)
-        self.channel = grpc.intercept_channel(
-            self.insecure_channel.__enter__(), LoggingInterceptor())
-        self.stub = trainsim_pb2_grpc.SimulationStub(self.channel)
-        self.scenario_stub = scenario_pb2_grpc.ScenarioStub(self.channel)
-
-        # get scene list and init one
-        scene_id_info = self.sce_stub.GetSceneIdList(train_task_pb2.GetSceneIdListRequest(task_id=task_id),
-                                                     metadata=self.metadata)
-        self.scenario_list = scene_id_info.scene_id_list
-        self.version_list = scene_id_info.scene_version_list
+        endpoint = "https://qianxing-api.risenlighten.com"
+        self.qx_client = Client(HttpConfig(
+            endpoint=endpoint,  # 接口地址
+            token=token,  # 授权token
+        ))
+        scene_list = self.qx_client.train_task.get_scene_id_list(task_id)
+        self.scenario_list = scene_list.scene_id_list
+        self.version_list = scene_list.scene_version_list
         self.scenario_id = self.scenario_list[0]
+        self.simulator = self.init_remote_lasvsim(
+            scenario_id=scene_list.scene_id_list[0],
+            scenario_version=scene_list.scene_version_list[0]
+        )
 
-        try:
-            self.startResp = self.init_remote_lasvsim(
-                scenario_id=self.scenario_list[0],
-                scenario_version=self.version_list[0]
-            )
-        except grpc.RpcError as e:
-            print(f"gRPC error during initialization: {e}")
-            raise
 
         # ================== 2. Process static map, surroundings and render ==================
         self.connections = {}
@@ -102,18 +59,14 @@ class LasvsimEnv():
         self.lanes = {}
         self.segments = {}
         self.links = {}
-        self.map_dict = {}
+        self.map_dict = {} # scenaio_id -> Qxmap
         for i in range(len(self.scenario_list)):
-            startResp = self.init_remote_lasvsim(
-                scenario_id=self.scenario_list[i],
-                scenario_version=self.version_list[i]
-            )
-            cur_map = self.get_remote_hdmap(startResp)
+            cur_map = self.get_remote_hdmap(self.scenario_list[i], self.version_list[i])
             self.map_dict[self.scenario_list[i]] = cur_map
 
-        self.covert_map(self.scenario_list[0])
+        self.convert_map(self.scenario_list[0])
         print("len(self.lanes): ", len(self.lanes))
-        # TODO: 根据self.lanes，将车道中心线转化为self.map_objs
+        # 根据self.lanes，将车道中心线转化为self.map_objs
         # 首先将每条车道构造成linestring对象，利用segmentize函数切成小段
         map_objs = []
         for lane_id, lane in self.lanes.items():
@@ -183,40 +136,23 @@ class LasvsimEnv():
         self.update_lasvsim_context()
         self.render_flag = render_flag
         self.traj_flag = traj_flag  # for log
-        self._render_init(render_info=render_info)
+        # self._render_init(render_info=render_info)
 
     def init_remote_lasvsim(self, scenario_id: str, scenario_version: str):
-        startResp = self.stub.Init(
-            trainsim_pb2.InitReq(scenario_id=scenario_id,
-                                 scenario_version=scenario_version),
-            metadata=self.metadata
-        )
-        return startResp
+        print(f"[LasvsimEnv] init_remote_lasvim with scenario_id={scenario_id} and version={scenario_version}...")
+        return self.qx_client.init_simulator_from_config(SimulatorConfig(
+            scen_id=scenario_id,
+            scen_ver=scenario_version,
+        ))
 
     def reset_remote_lasvsim(self):
-        resetResp = self.stub.Reset(
-            trainsim_pb2.ResetReq(simulation_id=self.startResp.simulation_id,
-                                  scenario_id=self.scenario_id),
-            metadata=self.metadata,
-        )
-        return resetResp
+        return self.simulator.reset()
 
     def step_remote_lasvsim(self):
-        stepResult = self.stub.Step(
-            trainsim_pb2.StepReq(simulation_id=self.startResp.simulation_id
-                                 ),
-            metadata=self.metadata
-        )
-        return stepResult
+        return self.simulator.step()
 
     def stop_remote_lasvsim(self, simulation_id: str = None):
-        if simulation_id is None:
-            simulation_id = self.startResp.simulation_id
-        resetResp = self.stub.Stop(
-            trainsim_pb2.StopReq(simulation_id=simulation_id),
-            metadata=self.metadata,
-        )
-        return resetResp
+        return self.simulator.stop()
 
     def update_lasvsim_context(self, real_action: np.ndarray = None):
         ego_context = self.get_ego_context(real_action)
@@ -463,7 +399,7 @@ class LasvsimEnv():
                 self.stop_remote_lasvsim()
                 idx = random.randint(0, len(self.scenario_list) - 1)
                 self.scenario_id = self.scenario_list[idx]
-                self.startResp = self.init_remote_lasvsim(
+                self.simulator = self.init_remote_lasvsim(
                     scenario_id=self.scenario_id,
                     scenario_version=self.version_list[idx]
                 )
@@ -471,7 +407,7 @@ class LasvsimEnv():
                 test_vehicle = self.get_remote_lasvsim_test_veh_list()
                 if (test_vehicle is not None):
                     test_vehicle_list = test_vehicle.list
-                self.covert_map(self.scenario_list[idx])
+                self.convert_map(self.scenario_list[idx])
             self.scenario_cnt = 0
 
         self.ego_id = test_vehicle_list[0]
@@ -944,15 +880,7 @@ class LasvsimEnv():
         }
     
     def check_collision(self) -> bool:
-        collision_info = self.stub.GetVehicleCollisionInfo(
-            trainsim_pb2.GetVehicleCollisionInfoReq(
-                simulation_id=self.startResp.simulation_id,
-                vehicle_id=self.ego_id,
-            ),
-            metadata=self.metadata
-        )
-        collision_flag = collision_info.collision_flag
-        return collision_flag
+        return self.simulator.get_vehicle_collision_status(self.ego_id).collision_status
 
     def check_out_of_driving_area(self) -> bool:
         vehicles_position = self.get_remote_lasvsim_veh_position()
@@ -1092,7 +1020,6 @@ class LasvsimEnv():
     def get_sur_context(self):
         perception_info = self.get_remote_lasvsim_perception_info()
         around_moving_objs = perception_info.list
-        self._render_parse_surcar(around_moving_objs)
 
         ego_x, ego_y, ego_phi = self.lasvsim_context.ego.x, \
             self.lasvsim_context.ego.y, \
@@ -1148,7 +1075,7 @@ class LasvsimEnv():
         #                    for _ in range(self.surr_veh_num - len(sur_context)))
         return sur_context
 
-    def covert_map(self, scenario_id: str):
+    def convert_map(self, scenario_id: str):
         traffic_map = self.map_dict[scenario_id]
         for segment in traffic_map.data.segments:
             for link in segment.ordered_links:
@@ -1156,342 +1083,27 @@ class LasvsimEnv():
                     # print("lane: ", lane)
                     self.lanes[lane.id] = lane
 
-    def get_remote_hdmap(self, startResp):
-        hdmap = self.scenario_stub.GetHdMap(
-            scenario_pb2.GetHdMapReq(simulation_id=startResp.simulation_id),
-            metadata=self.metadata
-        )
-        return hdmap
+    def get_remote_hdmap(self, scenario_id: str, version: str):
+        return self.qx_client.resources.get_hd_map(scenario_id, version)
 
     def get_remote_lasvsim_test_veh_list(self):
-        test_vehicle = self.stub.GetTestVehicleIdList(
-            trainsim_pb2.GetTestVehicleIdListReq(
-                simulation_id=self.startResp.simulation_id,
-            ),
-            metadata=self.metadata
-        )
-        return test_vehicle
+        return self.simulator.get_test_vehicle_id_list()
 
     def set_remote_lasvsim_veh_control(self, real_action: np.ndarray):
         lon_acc, ste_wheel = real_action
-        vehicleControlResult = self.stub.SetVehicleControlInfo(
-            trainsim_pb2.SetVehicleControlInfoReq(
-                simulation_id=self.startResp.simulation_id,
-                vehicle_id=self.ego_id,
-                lon_acc=lon_acc,
-                ste_wheel=ste_wheel
-            ),
-            metadata=self.metadata
-        )
-        return vehicleControlResult
+        return self.simulator.set_vehicle_control_info(self.ego_id, ste_wheel, lon_acc)
 
     def get_remote_lasvsim_veh_position(self):
-        vehicles_position = self.stub.GetVehiclePosition(
-            trainsim_pb2.GetVehiclePositionReq(
-                simulation_id=self.startResp.simulation_id,
-                id_list=[self.ego_id]
-            ),
-            metadata=self.metadata
-        )
-        return vehicles_position
+        return self.simulator.get_vehicle_position([self.ego_id])
 
     def get_remote_lasvsim_veh_base_info(self):
-        vehicles_baseInfo = self.stub.GetVehicleBaseInfo(
-            trainsim_pb2.GetVehicleBaseInfoReq(
-                simulation_id=self.startResp.simulation_id,
-                id_list=[self.ego_id]
-            ),
-            metadata=self.metadata
-        )
-        return vehicles_baseInfo
+        return self.simulator.get_vehicle_base_info([self.ego_id])
 
     def get_remote_lasvsim_veh_moving_info(self):
-        vehicles_MovingInfo = self.stub.GetVehicleMovingInfo(
-            trainsim_pb2.GetVehicleMovingInfoReq(
-                simulation_id=self.startResp.simulation_id,
-                id_list=[self.ego_id]
-            ),
-            metadata=self.metadata
-        )
-        return vehicles_MovingInfo
+        return self.simulator.get_vehicle_moving_info([self.ego_id])
 
     def get_remote_lasvsim_ref_line(self):
-        ref_points = self.stub.GetVehicleReferenceLines(
-            trainsim_pb2.GetVehicleReferenceLinesReq(
-                simulation_id=self.startResp.simulation_id,
-                vehicle_id=self.ego_id
-            ),
-            metadata=self.metadata
-        )
-        return ref_points
+        return self.simulator.get_vehicle_reference_lines(self.ego_id)
 
     def get_remote_lasvsim_perception_info(self):
-        perception_info = self.stub.GetVehiclePerceptionInfo(
-            trainsim_pb2.GetVehiclePerceptionInfoReq(
-                simulation_id=self.startResp.simulation_id,
-                vehicle_id=self.ego_id,
-            ),
-            metadata=self.metadata
-        )
-        return perception_info
-
-    def __del__(self):
-        self.insecure_channel.__exit__(None, None, None)
-
-    # ================== Render utils ==================
-
-    # Core params
-    _render_count = 0
-    _render_tags = _render_tags
-    _render_tags_debug = render_tags_debug
-    _render_cfg: RenderCfg
-    render_flag: bool
-    traj_flag: bool
-
-    # data buffers
-    _render_info = {}
-    _render_ego_shadows = deque([])
-    _render_surcars: list
-    _render_done_info = {}
-
-    def _render_init(self, render_info):
-        if not self.render_flag and not self.traj_flag:
-            print("Without pic and data saved")
-            return
-        else:
-            print(
-                f"Into the data verbose mode. render: {self.render_flag}, traj: {self.traj_flag}")
-
-        _map = Map()
-        # New interface not support hdmap obj
-        _map.load_hd(self.map_dict[self.scenario_list[0]])
-
-        path_flag = render_info.get("_debug_path_qxdata", None)
-        if path_flag is None:
-            policy = render_info.get("policy", None)
-            if policy is not None:
-                _debug_path_qxdata = f"./data_qx/{'draw' if self.render_flag else 'data'}/{policy}/" \
-                    + time.strftime("%m-%d-%H:%M:%S")
-            else:
-                # In the training mode
-                _debug_path_qxdata = f"./data_qx/train/" \
-                    + time.strftime("%m-%d-%H:%M:%S")
-
-            # The first time is init, the inited info is get by the path key
-            # Warning should assert that it's shared
-            render_info["_debug_path_qxdata"] = _debug_path_qxdata
-            os.makedirs(_debug_path_qxdata, exist_ok=True)
-
-            self._render_cfg = RenderCfg()
-            self._render_cfg.set_vals(**{
-                "_debug_path_qxdata": _debug_path_qxdata,
-                "show_npc": render_info["show_npc"],
-                "draw_bound": render_info["draw_bound"],
-                # "map": _map,
-                "render_type": render_info["type"],  # pic type
-                "render_config": render_info,
-            })
-            self._render_cfg.save()
-        else:
-            _debug_path_qxdata = path_flag
-            self._render_cfg = RenderCfg()
-            self._render_cfg.set_vals(**{
-                "_debug_path_qxdata": _debug_path_qxdata,
-                "show_npc": render_info["show_npc"],
-                "draw_bound": render_info["draw_bound"],
-                "map": _map,
-                "render_type": render_info["type"],  # pic type
-                "render_config": render_info,
-            })
-            # self._render_cfg.save()
-
-        if self.render_flag:
-            f = plt.figure(figsize=(16, 9))
-            # draw totoal map
-            _map.draw()
-            plt.cla()
-
-            f.subplots_adjust(left=0.25)
-            _map.draw_everything(show_id=False, show_link_boundary=False)
-
-    def _render_parse_surcar(self, around_moving_objs):
-        ret = []
-
-        for neighbor in around_moving_objs:
-            row =\
-                [
-                    neighbor.position.point.x,
-                    neighbor.position.point.y,
-                    neighbor.base_info.length,
-                    neighbor.base_info.width,
-                    neighbor.position.phi,
-                    getattr(neighbor.base_info, "obj_id", "none")
-                ]
-            ret.append(row)
-
-        self._render_surcars = ret
-
-    def _render_save_traj(self):
-
-        _debug_adaptive_vars = {
-            # # "_debug_dyn_state"    : self._debug_dyn_state.numpy(),
-            # "_debug_done_errlat": self._debug_done_errlat,
-            # # "_debug_done_errlon"  : self._debug_done_errlon ,
-            # "_debug_done_errhead": self._debug_done_errhead,
-            # "_debug_done_postype": self._debug_done_postype,
-            # "_debug_reward_scaled_punish_boundary": self._debug_reward_scaled_punish_boundary,
-        }
-
-        # filter save, make a triger to save vital cases.
-        obj = \
-            LasStateSurrogate(
-                # Basic draw
-                self.lasvsim_context.ego.state, 
-                None,
-                None,
-                None,
-                # self._ref_points,
-                # self.action,
-                # self._state[:6].astype(np.float32),
-                self._render_surcars,
-                self._render_info,
-                self._render_done_info,
-                _debug_adaptive_vars,
-
-                # Dynamic test
-                # self._debug_dyn_state.numpy()
-            )
-
-        append_to_pickle_incremental(os.path.join(
-            self._render_cfg._debug_path_qxdata, "trajs.pkl"), obj)
-        pass
-
-    def _render_update_info(self, mf_info, *, add_info={}):
-        self._render_info = {}
-        for tag in self._render_tags:
-            if tag in mf_info.keys() and mf_info[tag] is not None:
-                self._render_info[tag] = mf_info[tag]
-            # self._render_info.update(add_info)
-
-    def _render_sur_byobs(self, neighbor_info=None, color='black', *, save_func=None, show_done=True, show_debug=False, **kwargs):
-        if self.traj_flag:
-            self._render_save_traj()
-        if not self.render_flag:
-            return
-
-        original_nei = self._render_surcars
-
-        f, ax = plt.gcf(), plt.gca()
-        self._state = self.lasvsim_context.ego.state # x, y, vx, vy, phi, w
-        self.action = self.lasvsim_context.ego.action
-        ego_x, ego_y = self._state[0], self._state[1]
-        phi = self._state[4]
-        dx, dy = self._render_cfg.arrow_len * \
-            np.cos(phi), self._render_cfg.arrow_len*np.sin(phi)
-        arrow = plt.arrow(ego_x, ego_y, dx, dy, head_width=0.5)
-        plt.xlim(ego_x-self._render_cfg.draw_bound,
-                 ego_x+self._render_cfg.draw_bound)
-        plt.ylim(ego_y-self._render_cfg.draw_bound,
-                 ego_y+self._render_cfg.draw_bound)
-        dot = plt.scatter(ego_x, ego_y, color='red', s=10)
-        self._render_ego_shadows.append((dot, arrow))
-
-        # ref_x, ref_y = self._ref_points[:, 0], self._ref_points[:, 1]
-        # ref_lines = plt.plot(ref_x, ref_y, ls="dotted",
-        #                      color="red", linewidth=8)
-
-        # reward, reward_info = self._buffered_reward
-        text_strs = [
-            f"Ego_speed: {self._state[2]:.2f}",
-            f"act: {self.action[0]:.2f}, {self.action[1] * 180 / np.pi:.2f}",
-            f"yaw rate: {self._state[5]:.3f}",
-            f"vx, vy, phi: {self._state[2]:.2f}, {self._state[3]:.2f}, {self._state[4]:.2f}",
-            f"pos: {self._state[0]:.2f}, {self._state[1]:.2f}",
-            # f"reward: {reward}"
-        ] + [f"{key}: {val:.2f}" for key, val in self._render_info.items()]
-
-        if show_done:
-            text_strs += [f"{key}:{val};" for key,
-                          val in self._render_done_info.items()]
-        if show_debug:
-            text_strs += [f"{key}:{self[key]};" for key in self._render_tags_debug]
-
-        height = 1/len(text_strs)
-        text_locs = [(0.2, 1-height*i) for i, _ in enumerate(text_strs)]
-        text_objs = []
-        for text_str, text_loc in zip(text_strs, text_locs):
-            text_obj = f.text(
-                text_loc[0], text_loc[1],
-                text_str,
-                fontsize=10,
-                fontweight='bold',
-                ha='right',  #
-                va='top',  #
-                color=color  #
-            )
-            text_objs.append(text_obj)
-
-        def draw_car(center_x, center_y, length, width, phi, facecolor="lightblue", id=None):
-            car = patches.Rectangle(
-                # Bottom-left corner of the rectangle
-                (center_x - length / 2, center_y - width / 2),
-                length,  # Width
-                width,   # Height
-                angle=np.degrees(phi),  # Rotation angle in degrees
-                edgecolor='black',
-                rotation_point="center",
-                facecolor=facecolor,
-                alpha=0.5
-            )
-            text = None
-            if self._render_cfg.show_npc:
-                info = f"({center_x:.2f}, {center_y:.2f}): {phi:.2f}"
-                if id is not None:
-                    info = f"{id}: " + info
-                text = ax.text(center_x, center_y, info, fontsize=13)
-            return car, text
-
-        def remove_car(car_t):
-            car, text = car_t
-            car.remove()
-            if text is not None:
-                text.remove()
-
-        car_rectangles = []
-
-        for index, neighbor in enumerate(original_nei):
-
-            center_x, center_y, length, width, phi, obj_id = neighbor
-
-            if ego_x-self._render_cfg.draw_bound <= center_x and ego_x+self._render_cfg.draw_bound >= center_x and ego_y-self._render_cfg.draw_bound <= center_y and ego_y+self._render_cfg.draw_bound >= center_y:
-                car_rectangles.append(
-                    draw_car(center_x, center_y, length, width, phi, obj_id))
-                plt.gca().add_patch(car_rectangles[-1][0])
-        length = self.lasvsim_context.ego.length
-        width = self.lasvsim_context.ego.width
-        ego_car_t = draw_car(float(self._state[0]), float(self._state[1]), 
-                             length, width, self._state[4], "pink", "ego")
-        plt.gca().add_patch(ego_car_t[0])
-        car_rectangles.append(ego_car_t)
-
-        # saving
-        if save_func is None:
-            self._render_count += 1
-            f.savefig(os.path.join(f"{self._render_cfg._debug_path_qxdata}", str(
-                self._render_count) + self._render_cfg.render_type), dpi=self._render_cfg["dpi"])
-        else:
-            save_func(f, ax)
-
-        # Cleaning
-        for text_obj in text_objs:
-            text_obj.remove()
-        for car in car_rectangles:
-            remove_car(car)
-        # for line in ref_lines:
-        #     line.remove()
-
-        if len(self._render_ego_shadows) > 30:
-            ego = self._render_ego_shadows.popleft()
-            for i in ego:
-                i.remove()
-        return
+        return self.simulator.get_vehicle_perception_info(self.ego_id)
