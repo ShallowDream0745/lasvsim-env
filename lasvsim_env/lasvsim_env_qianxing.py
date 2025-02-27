@@ -38,7 +38,7 @@ class LasvsimEnv():
         assert task_id is not None, "None task id"
 
         # ================== 1. Build a connection ==================
-        endpoint = "https://qianxing-api.risenlighten.com"
+        endpoint = "http://localhost:8290"
         self.qx_client = Client(HttpConfig(
             endpoint=endpoint,  # 接口地址
             token=token,  # 授权token
