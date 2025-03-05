@@ -129,7 +129,6 @@ class HttpClient():
                 message = f"Error parsing response: {e}",
                 url=f"{response.request.method},{response.url}"
             )
-
     def get(self, path: str, params: Dict[str, str] = None, out_type: Optional[Type[T]] = None) -> T:
         """Send GET request.
         
