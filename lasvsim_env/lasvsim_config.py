@@ -11,12 +11,12 @@ else:
 
 lasvsim_config = {
     'token': token_str,
-    'task_id': 146,
+    'task_id': 147,
     'record_id': [1, 2, 3], ## simulation id list
     'b_surr': True,
     "render_flag": False,
     "traj_flag": False,
-    "server_host" : 'localhost:8290',
+    "server_host" : 'http://localhost:8290',
 }
 
 pre_horizon = 30
