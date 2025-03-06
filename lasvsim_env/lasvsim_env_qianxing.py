@@ -59,8 +59,6 @@ class LasvsimEnv():
         token: str,
         env_config: Dict = {},
         task_id=None,
-        render_flag: bool = False,
-        traj_flag: bool = False,
         **kwargs: Any,
     ):
         self.metadata = [('authorization', 'Bearer ' + token)]
@@ -98,7 +96,7 @@ class LasvsimEnv():
             self.config["real_action_upper_bound"])
         self.real_action_lower = np.array(
             self.config["real_action_lower_bound"])
-        self.surr_veh_num = self.config['obs_num_surrounding_vehicles']
+        self.surr_veh_num = self.config['obs_dict']['max_num_agents_observed']
         
         # init ego vehicle
         test_vehicle = self.get_remote_lasvsim_test_veh_list()
@@ -112,8 +110,6 @@ class LasvsimEnv():
         self.can_not_get_lane_id = False
         self.step_remote_lasvsim()
         self.update_lasvsim_context()
-        self.render_flag = render_flag
-        self.traj_flag = traj_flag  # for log
         # self._render_init(render_info=render_info)
 
         # ================== 3. Process static map, surroundings and render ==================
@@ -245,44 +241,16 @@ class LasvsimEnv():
         )
         time_5 = time()
         # print(f"----set lasvsim_context: {(time_5 - time_4) * 1000} ms.")
-    
-    def get_traffic_light_param(self) -> np.ndarray:
-        N = self.config["N"]
-        # # from vehicle CG to stopline
-        # if env.engine.context.vehicle.ahead_lane_length != -1:
-        #     ahead_lane_length = env.engine.context.vehicle.ahead_lane_length + \
-        #         env.engine.context.vehicle.length * 0.5
-        # else:
-        #     ahead_lane_length = env.engine.context.vehicle.ahead_lane_length
-        # remain_phase_time = env.engine.context.vehicle.remain_phase_time
-        # in_junction = env.engine.context.vehicle.in_junction
-        # if ahead_lane_length < model_config.ahead_lane_length_max \
-        #         and ahead_lane_length >= 0.:
-        #     traffic_light = encode_traffic_light(
-        #         env.engine.context.vehicle.traffic_light)
-        # else:
-        #     traffic_light = encode_traffic_light('g')
 
-        traffic_light = 0
-        in_junction = self.lasvsim_context.ego.in_junction
-        ahead_lane_length = 50
-        traffic_light_param = np.ones((N+1, 3))
-        traffic_light_param[:, 0] = traffic_light * np.ones((N+1))
-        traffic_light_param[:, 1] = ahead_lane_length * np.ones((N+1))
-        traffic_light_param[:, 2] = in_junction * np.ones((N+1))
-        return traffic_light_param
 
     def get_all_ref_param(self) -> np.ndarray:
-        # [num_ref_lines, num_ref_points+N, per_point_dim]
-        N = self.config["N"]
-        num_ref_lines = self.config["num_ref_lines"]
-        num_ref_points = self.config["num_ref_points"]
+        # return: ref_param [VARIABLE_NUM, ref_horizon, per_point_dim]
+        ref_horizon = self.config["ref_horizon"]
         ref_list = self.lasvsim_context.ref_list
-        ref_v_lane = self.config["ref_v_lane"] # TODO: RANDOM REF_V_LANE
-        # print("ref_v_lane:", ref_v_lane)
+        traffic_light = 0 # TODO: get traffic light from qianxing self.lasvsim_context.xxxx
+        max_speed = self.config["max_speed"]
         dt = self.config["dt"]
 
-        traffic_light = self.get_traffic_light_param()[0, 0]
         path_planning_mode = "green"
         if traffic_light == 0:
             am = self.config["dec_before_junction_green"]
@@ -294,15 +262,15 @@ class LasvsimEnv():
         
         driving_task = "s"
         if driving_task == "s":
-            ref_v_junction = ref_v_lane * self.config["v_discount_in_junction_straight"]
+            ref_v_junction = max_speed * self.config["v_discount_in_junction_straight"]
         elif driving_task == "l":
-            ref_v_junction = ref_v_lane * self.config["v_discount_in_junction_left_turn"]
+            ref_v_junction = max_speed * self.config["v_discount_in_junction_left_turn"]
         elif driving_task == "r":
-            ref_v_junction = ref_v_lane * self.config["v_discount_in_junction_right_turn"]
+            ref_v_junction = max_speed * self.config["v_discount_in_junction_right_turn"]
         else:
             raise ValueError("Error driving task: {}".format(driving_task))
         
-        cur_v = ref_v_lane
+        cur_v = max_speed
 
         ref_param = []
         for ref_line in ref_list:
@@ -318,17 +286,17 @@ class LasvsimEnv():
             
             if current_part['destination'] == True:
                 position_on_ref = point_project_to_line(ref_line, *ego.ground_position)
-                intervals, ref_v = compute_intervals(ref_info, num_ref_points + N -1, cur_v, ref_v_lane, dt, 0)
+                intervals, ref_v = compute_intervals(ref_info, ref_horizon, cur_v, max_speed, dt, 0)
             elif current_part['destination'] == False and current_part["in_junction"] == True:
                 intervals, ref_v = compute_intervals_in_junction(
-                    num_ref_points + N - 1, ref_v_junction, dt)
+                    ref_horizon, ref_v_junction, dt)
             elif current_part["in_junction"] == False and current_part['destination'] == False:
                 if path_planning_mode == "green":
                     intervals, ref_v = compute_intervals_initsegment_green(
-                        position_on_ref, current_part, num_ref_points + N - 1, ref_v_lane, ref_v_junction, dt, am)
+                        position_on_ref, current_part, ref_horizon, max_speed, ref_v_junction, dt, am)
                 elif path_planning_mode == "red":
                     intervals, ref_v = compute_intervals_initsegment_red(
-                        position_on_ref, current_part, num_ref_points + N - 1, ref_v_lane, dt, am, min_ahead_lane_length)
+                        position_on_ref, current_part, ref_horizon, max_speed, dt, am, min_ahead_lane_length)
                 else:
                     raise ValueError("Error path_planning_mode")
             else:
@@ -340,9 +308,6 @@ class LasvsimEnv():
             ref_array = compute_waypoints_by_intervals(ref_line, position_on_ref, intervals)
             ref_array = np.concatenate((ref_array, ref_v), axis=-1)
             ref_param.append(ref_array)
-        # padding
-        for _ in range(num_ref_lines - len(ref_list)):
-            ref_param.append(ref_param[0])
         return np.array(ref_param)
         
     def get_obs_from_context(self):
