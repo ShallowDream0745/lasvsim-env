@@ -946,8 +946,8 @@ class LasvsimEnv():
 
     def check_out_of_driving_area(self) -> bool:
         vehicles_position = self.get_remote_lasvsim_veh_position()
-        ego_pos = vehicles_position.position_dict.get(self.ego_id).position_type
-        out_of_driving_area_flag = (ego_pos == 1)
+        ego_pos = vehicles_position.position_dict.get(self.ego_id).type
+        out_of_driving_area_flag = (ego_pos == 3)
         return out_of_driving_area_flag
 
     def judge_done(self) -> bool:
