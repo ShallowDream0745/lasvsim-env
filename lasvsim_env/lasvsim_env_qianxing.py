@@ -11,7 +11,7 @@ from shapely.geometry import Point, LineString, Polygon
     
 from lasvsim_openapi.client import Client
 from lasvsim_openapi.http_client import HttpConfig
-from lasvsim_openapi.simulator_model import SimulatorConfig
+from lasvsim_openapi.simulator_model import SimulatorConfig, Point as QxPoint
 from lasvsim_env.lasvsim_dataclasses import EgoVehicle, SurroundingVehicle, LasVSimContext
 from lasvsim_env.utils.map_tool.lib.map import Map
 from lasvsim_env.utils.lib import \
@@ -473,6 +473,23 @@ class LasvsimEnv():
             self.scenario_cnt = 0
 
         self.ego_id = test_vehicle_list[0]
+        # TODO: 速度和位置的随机初始化
+        random_init_v = np.random.uniform(0, 10)
+        self.simulator.set_vehicle_moving_info(self.ego_id, random_init_v)
+        # 获取自车位置
+        vehicles_position = self.get_remote_lasvsim_veh_position()
+        x = vehicles_position.position_dict.get(self.ego_id).point.x
+        y = vehicles_position.position_dict.get(self.ego_id).point.y
+        phi = vehicles_position.position_dict.get(self.ego_id).phi
+        random_offset_x = np.random.normal(0.0, 1.0)
+        random_offset_y = np.random.normal(0.0, 1.0)
+        random_offset_phi = np.random.normal(0.0, 0.1)
+        self.simulator.set_vehicle_position(self.ego_id, QxPoint(
+            x + random_offset_x,
+            y + random_offset_y,
+            phi + random_offset_phi
+        ))
+
         self.update_lasvsim_context()
         obs = self.get_obs_from_context()
         info = {}
@@ -964,7 +981,8 @@ class LasvsimEnv():
             "Pause": park_flag,
             "RegionOut": out_of_defined_region,
             "Collision": collision,
-            "MapOut": out_of_driving_area
+            "MapOut": out_of_driving_area,
+            "alive_step": self.alive_step
         }
         done = collision or out_of_defined_region or out_of_driving_area
         time_4 = time()
