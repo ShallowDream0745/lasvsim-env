@@ -84,8 +84,8 @@ class LasvsimEnv():
         # init variables
         self.config = env_config
         self.scenario_cnt = 0
-        self.timestamp = 0
-        self.ref_index = 0
+        self.alive_step = 0
+        self.max_step = env_config["max_steps"]
         self.action_lower_bound = np.array(self.config["action_lower_bound"])
         self.action_upper_bound = np.array(self.config["action_upper_bound"])
         self.action_center = (self.action_upper_bound +
@@ -415,6 +415,8 @@ class LasvsimEnv():
 
     def step(self, action: np.ndarray):
         # action: network output, \in [-1, 1]
+        self.alive_step += 1
+
         time_1 = time()
         action = inverse_normalize_action(action, self.action_half_range, self.action_center)
         real_action = action + self.lasvsim_context.ego.last_action
@@ -438,12 +440,14 @@ class LasvsimEnv():
         # print(f"--reward_function_multilane: {(time_6 - time_5) * 1000} ms.")
 
         obs = self.get_obs_from_context()
+        truncated = self.alive_step >= self.max_step
         time_7 = time()
         # print(f"--get_obs_from_context: {(time_7 - time_6) * 1000} ms.")
-        return obs, reward, self.judge_done(), self.judge_done(), rew_info
+        return obs, reward, self.judge_done(), truncated, rew_info
 
     def reset(self):
         test_vehicle_list = []
+        self.alive_step = 0
         if self.scenario_cnt < 10:
             while len(test_vehicle_list) == 0:
                 self.reset_remote_lasvsim()
