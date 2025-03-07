@@ -96,6 +96,8 @@ class LasvsimEnv():
             self.config["real_action_upper_bound"])
         self.real_action_lower = np.array(
             self.config["real_action_lower_bound"])
+
+        self.max_num_map_observed = self.config['obs_dict']['max_num_map_observed']
         self.surr_veh_num = self.config['obs_dict']['max_num_agents_observed']
         
         # init ego vehicle
@@ -345,9 +347,10 @@ class LasvsimEnv():
         # Calculate distances to ego center
         distances = np.sqrt(np.sum((obj_centers - ego_center) ** 2, axis=1))
 
-        # Use partition to find indices of 200 nearest objects 
-        selected_obj_index = np.argpartition(distances, 200)[:200]
-        selected_objs = self.map_objs[selected_obj_index]
+        # Use partition to find indices of self.max_num_map_observed nearest objects 
+        selected_indices = np.argpartition(distances, self.max_num_map_observed)[:self.max_num_map_observed]
+        sorted_indices = selected_indices[np.argsort(distances[selected_indices])]
+        selected_objs = self.map_objs[sorted_indices]
         
         cos_tf = np.cos(-ego_phi)
         sin_tf = np.sin(-ego_phi)
